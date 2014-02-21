@@ -17,10 +17,12 @@
 package com.google.zxing.client.android;
 
 import com.google.zxing.BarcodeFormat;
+import com.google.zxing.DecodeHintType;
 import com.google.zxing.Result;
 import com.google.zxing.ResultMetadataType;
 import com.google.zxing.ResultPoint;
 import com.google.zxing.client.android.camera.CameraManager;
+import com.google.zxing.client.android.clipboard.ClipboardInterface;
 import com.google.zxing.client.android.history.HistoryActivity;
 import com.google.zxing.client.android.history.HistoryItem;
 import com.google.zxing.client.android.history.HistoryManager;
@@ -34,8 +36,6 @@ import android.app.Activity;
 import android.app.AlertDialog;
 import android.content.Intent;
 import android.content.SharedPreferences;
-import android.content.pm.PackageInfo;
-import android.content.pm.PackageManager;
 import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
 import android.graphics.Canvas;
@@ -45,7 +45,6 @@ import android.os.Bundle;
 import android.os.Handler;
 import android.os.Message;
 import android.preference.PreferenceManager;
-import android.text.ClipboardManager;
 import android.util.Log;
 import android.util.TypedValue;
 import android.view.KeyEvent;
@@ -68,7 +67,6 @@ import java.util.Collection;
 import java.util.Date;
 import java.util.EnumSet;
 import java.util.Map;
-import java.util.Set;
 
 /**
  * This activity opens the camera and does the actual scanning on a background thread. It draws a
@@ -85,14 +83,11 @@ public final class CaptureActivity extends Activity implements SurfaceHolder.Cal
   private static final long DEFAULT_INTENT_RESULT_DURATION_MS = 1500L;
   private static final long BULK_MODE_SCAN_DELAY_MS = 1000L;
 
-  private static final String PACKAGE_NAME = "com.google.zxing.client.android";
-  private static final String PRODUCT_SEARCH_URL_PREFIX = "http://www.google";
-  private static final String PRODUCT_SEARCH_URL_SUFFIX = "/m/products/scan";
   private static final String[] ZXING_URLS = { "http://zxing.appspot.com/scan", "zxing://scan/" };
 
   public static final int HISTORY_REQUEST_CODE = 0x0000bacc;
 
-  private static final Set<ResultMetadataType> DISPLAYABLE_METADATA_TYPES =
+  private static final Collection<ResultMetadataType> DISPLAYABLE_METADATA_TYPES =
       EnumSet.of(ResultMetadataType.ISSUE_NUMBER,
                  ResultMetadataType.SUGGESTED_PRICE,
                  ResultMetadataType.ERROR_CORRECTION_LEVEL,
@@ -111,6 +106,7 @@ public final class CaptureActivity extends Activity implements SurfaceHolder.Cal
   private String sourceUrl;
   private ScanFromWebPageManager scanFromWebPageManager;
   private Collection<BarcodeFormat> decodeFormats;
+  private Map<DecodeHintType,?> decodeHints;
   private String characterSet;
   private HistoryManager historyManager;
   private InactivityTimer inactivityTimer;
@@ -145,8 +141,6 @@ public final class CaptureActivity extends Activity implements SurfaceHolder.Cal
     ambientLightManager = new AmbientLightManager(this);
 
     PreferenceManager.setDefaultValues(this, R.xml.preferences, false);
-
-    showHelpOnFirstLaunch();
   }
 
   @Override
@@ -179,7 +173,6 @@ public final class CaptureActivity extends Activity implements SurfaceHolder.Cal
     } else {
       // Install the callback and wait for surfaceCreated() to init the camera.
       surfaceHolder.addCallback(this);
-      surfaceHolder.setType(SurfaceHolder.SURFACE_TYPE_PUSH_BUFFERS);
     }
 
     beepManager.updatePrefs();
@@ -207,6 +200,7 @@ public final class CaptureActivity extends Activity implements SurfaceHolder.Cal
         // Scan the formats the intent requested, and return the result to the calling activity.
         source = IntentSource.NATIVE_APP_INTENT;
         decodeFormats = DecodeFormatManager.parseDecodeFormats(intent);
+        decodeHints = DecodeHintManager.parseDecodeHints(intent);
 
         if (intent.hasExtra(Intents.Scan.WIDTH) && intent.hasExtra(Intents.Scan.HEIGHT)) {
           int width = intent.getIntExtra(Intents.Scan.WIDTH, 0);
@@ -222,8 +216,8 @@ public final class CaptureActivity extends Activity implements SurfaceHolder.Cal
         }
 
       } else if (dataString != null &&
-                 dataString.contains(PRODUCT_SEARCH_URL_PREFIX) &&
-                 dataString.contains(PRODUCT_SEARCH_URL_SUFFIX)) {
+                 dataString.contains("http://www.google") &&
+                 dataString.contains("/m/products/scan")) {
 
         // Scan only products and send the result to mobile Product Search.
         source = IntentSource.PRODUCT_SEARCH_LINK;
@@ -239,6 +233,8 @@ public final class CaptureActivity extends Activity implements SurfaceHolder.Cal
         Uri inputUri = Uri.parse(dataString);
         scanFromWebPageManager = new ScanFromWebPageManager(inputUri);
         decodeFormats = DecodeFormatManager.parseDecodeFormats(inputUri);
+        // Allow a sub-set of the hints to be specified by the caller.
+        decodeHints = DecodeHintManager.parseDecodeHints(inputUri);
 
       }
 
@@ -399,9 +395,10 @@ public final class CaptureActivity extends Activity implements SurfaceHolder.Cal
    * A valid barcode has been found, so give an indication of success and show the results.
    *
    * @param rawResult The contents of the barcode.
+   * @param scaleFactor amount by which thumbnail was scaled
    * @param barcode   A greyscale bitmap of the camera data which was decoded.
    */
-  public void handleDecode(Result rawResult, Bitmap barcode) {
+  public void handleDecode(Result rawResult, Bitmap barcode, float scaleFactor) {
     inactivityTimer.onActivity();
     lastResult = rawResult;
     ResultHandler resultHandler = ResultHandlerFactory.makeResultHandler(this, rawResult);
@@ -411,7 +408,7 @@ public final class CaptureActivity extends Activity implements SurfaceHolder.Cal
       historyManager.addHistoryItem(rawResult, resultHandler);
       // Then not from history, so beep/vibrate and we have an image to draw on
       beepManager.playBeepSoundAndVibrate();
-      drawResultPoints(barcode, rawResult);
+      drawResultPoints(barcode, scaleFactor, rawResult);
     }
 
     switch (source) {
@@ -429,9 +426,9 @@ public final class CaptureActivity extends Activity implements SurfaceHolder.Cal
       case NONE:
         SharedPreferences prefs = PreferenceManager.getDefaultSharedPreferences(this);
         if (fromLiveScan && prefs.getBoolean(PreferencesActivity.KEY_BULK_MODE, false)) {
-          String message = getResources().getString(R.string.msg_bulk_mode_scanned)
-              + " (" + rawResult.getText() + ')';
-          Toast.makeText(getApplicationContext(), message, Toast.LENGTH_SHORT).show();
+          Toast.makeText(getApplicationContext(),
+                         getResources().getString(R.string.msg_bulk_mode_scanned) + " (" + rawResult.getText() + ')',
+                         Toast.LENGTH_SHORT).show();
           // Wait a moment or else it will scan the same barcode continuously about 3 times
           restartPreviewAfterDelay(BULK_MODE_SCAN_DELAY_MS);
         } else {
@@ -445,9 +442,10 @@ public final class CaptureActivity extends Activity implements SurfaceHolder.Cal
    * Superimpose a line for 1D or dots for 2D to highlight the key features of the barcode.
    *
    * @param barcode   A bitmap of the captured image.
+   * @param scaleFactor amount by which thumbnail was scaled
    * @param rawResult The decoded results which contains the points to draw.
    */
-  private void drawResultPoints(Bitmap barcode, Result rawResult) {
+  private void drawResultPoints(Bitmap barcode, float scaleFactor, Result rawResult) {
     ResultPoint[] points = rawResult.getResultPoints();
     if (points != null && points.length > 0) {
       Canvas canvas = new Canvas(barcode);
@@ -455,24 +453,32 @@ public final class CaptureActivity extends Activity implements SurfaceHolder.Cal
       paint.setColor(getResources().getColor(R.color.result_points));
       if (points.length == 2) {
         paint.setStrokeWidth(4.0f);
-        drawLine(canvas, paint, points[0], points[1]);
+        drawLine(canvas, paint, points[0], points[1], scaleFactor);
       } else if (points.length == 4 &&
                  (rawResult.getBarcodeFormat() == BarcodeFormat.UPC_A ||
                   rawResult.getBarcodeFormat() == BarcodeFormat.EAN_13)) {
         // Hacky special case -- draw two lines, for the barcode and metadata
-        drawLine(canvas, paint, points[0], points[1]);
-        drawLine(canvas, paint, points[2], points[3]);
+        drawLine(canvas, paint, points[0], points[1], scaleFactor);
+        drawLine(canvas, paint, points[2], points[3], scaleFactor);
       } else {
         paint.setStrokeWidth(10.0f);
         for (ResultPoint point : points) {
-          canvas.drawPoint(point.getX(), point.getY(), paint);
+          if (point != null) {
+            canvas.drawPoint(scaleFactor * point.getX(), scaleFactor * point.getY(), paint);
+          }
         }
       }
     }
   }
 
-  private static void drawLine(Canvas canvas, Paint paint, ResultPoint a, ResultPoint b) {
-    canvas.drawLine(a.getX(), a.getY(), b.getX(), b.getY(), paint);
+  private static void drawLine(Canvas canvas, Paint paint, ResultPoint a, ResultPoint b, float scaleFactor) {
+    if (a != null && b != null) {
+      canvas.drawLine(scaleFactor * a.getX(), 
+                      scaleFactor * a.getY(), 
+                      scaleFactor * b.getX(), 
+                      scaleFactor * b.getY(), 
+                      paint);
+    }
   }
 
   // Put up our own UI for how to handle the decoded contents.
@@ -496,9 +502,8 @@ public final class CaptureActivity extends Activity implements SurfaceHolder.Cal
     typeTextView.setText(resultHandler.getType().toString());
 
     DateFormat formatter = DateFormat.getDateTimeInstance(DateFormat.SHORT, DateFormat.SHORT);
-    String formattedTime = formatter.format(new Date(rawResult.getTimestamp()));
     TextView timeTextView = (TextView) findViewById(R.id.time_text_view);
-    timeTextView.setText(formattedTime);
+    timeTextView.setText(formatter.format(new Date(rawResult.getTimestamp())));
 
 
     TextView metaTextView = (TextView) findViewById(R.id.meta_text_view);
@@ -554,15 +559,7 @@ public final class CaptureActivity extends Activity implements SurfaceHolder.Cal
     }
 
     if (copyToClipboard && !resultHandler.areContentsSecure()) {
-      ClipboardManager clipboard = (ClipboardManager) getSystemService(CLIPBOARD_SERVICE);
-      if (displayContents != null) {
-        try {
-          clipboard.setText(displayContents);
-        } catch (NullPointerException npe) {
-          // Some kind of bug inside the clipboard implementation, not due to null input
-          Log.w(TAG, "Clipboard bug", npe);
-        }
-      }
+      ClipboardInterface.setText(displayContents, this);
     }
   }
 
@@ -581,19 +578,17 @@ public final class CaptureActivity extends Activity implements SurfaceHolder.Cal
                                                   DEFAULT_INTENT_RESULT_DURATION_MS);
     }
 
-    // Since this message will only be shown for a second, just tell the user what kind of
-    // barcode was found (e.g. contact info) rather than the full contents, which they won't
-    // have time to read.
     if (resultDurationMS > 0) {
-      statusView.setText(getString(resultHandler.getDisplayTitle()));
+      String rawResultString = String.valueOf(rawResult);
+      if (rawResultString.length() > 32) {
+        rawResultString = rawResultString.substring(0, 32) + " ...";
+      }
+      statusView.setText(getString(resultHandler.getDisplayTitle()) + " : " + rawResultString);
     }
 
     if (copyToClipboard && !resultHandler.areContentsSecure()) {
-      ClipboardManager clipboard = (ClipboardManager) getSystemService(CLIPBOARD_SERVICE);
       CharSequence text = resultHandler.getDisplayContents();
-      if (text != null) {
-        clipboard.setText(text);
-      }
+      ClipboardInterface.setText(text, this);
     }
 
     if (source == IntentSource.NATIVE_APP_INTENT) {
@@ -614,7 +609,7 @@ public final class CaptureActivity extends Activity implements SurfaceHolder.Cal
           intent.putExtra(Intents.Scan.RESULT_UPC_EAN_EXTENSION,
                           metadata.get(ResultMetadataType.UPC_EAN_EXTENSION).toString());
         }
-        Integer orientation = (Integer) metadata.get(ResultMetadataType.ORIENTATION);
+        Number orientation = (Number) metadata.get(ResultMetadataType.ORIENTATION);
         if (orientation != null) {
           intent.putExtra(Intents.Scan.RESULT_ORIENTATION, orientation.intValue());
         }
@@ -622,6 +617,7 @@ public final class CaptureActivity extends Activity implements SurfaceHolder.Cal
         if (ecLevel != null) {
           intent.putExtra(Intents.Scan.RESULT_ERROR_CORRECTION_LEVEL, ecLevel);
         }
+        @SuppressWarnings("unchecked")
         Iterable<byte[]> byteSegments = (Iterable<byte[]>) metadata.get(ResultMetadataType.BYTE_SEGMENTS);
         if (byteSegments != null) {
           int i = 0;
@@ -652,39 +648,14 @@ public final class CaptureActivity extends Activity implements SurfaceHolder.Cal
   }
   
   private void sendReplyMessage(int id, Object arg, long delayMS) {
-    Message message = Message.obtain(handler, id, arg);
-    if (delayMS > 0L) {
-      handler.sendMessageDelayed(message, delayMS);
-    } else {
-      handler.sendMessage(message);
-    }
-  }
-
-  /**
-   * We want the help screen to be shown automatically the first time a new version of the app is
-   * run. The easiest way to do this is to check android:versionCode from the manifest, and compare
-   * it to a value stored as a preference.
-   */
-  private boolean showHelpOnFirstLaunch() {
-    try {
-      PackageInfo info = getPackageManager().getPackageInfo(PACKAGE_NAME, 0);
-      int currentVersion = info.versionCode;
-      SharedPreferences prefs = PreferenceManager.getDefaultSharedPreferences(this);
-      int lastVersion = prefs.getInt(PreferencesActivity.KEY_HELP_VERSION_SHOWN, 0);
-      if (currentVersion > lastVersion) {
-        prefs.edit().putInt(PreferencesActivity.KEY_HELP_VERSION_SHOWN, currentVersion).commit();
-        Intent intent = new Intent(this, HelpActivity.class);
-        intent.addFlags(Intent.FLAG_ACTIVITY_CLEAR_WHEN_TASK_RESET);
-        // Show the default page on a clean install, and the what's new page on an upgrade.
-        String page = lastVersion == 0 ? HelpActivity.DEFAULT_PAGE : HelpActivity.WHATS_NEW_PAGE;
-        intent.putExtra(HelpActivity.REQUESTED_PAGE_KEY, page);
-        startActivity(intent);
-        return true;
+    if (handler != null) {
+      Message message = Message.obtain(handler, id, arg);
+      if (delayMS > 0L) {
+        handler.sendMessageDelayed(message, delayMS);
+      } else {
+        handler.sendMessage(message);
       }
-    } catch (PackageManager.NameNotFoundException e) {
-      Log.w(TAG, e);
     }
-    return false;
   }
 
   private void initCamera(SurfaceHolder surfaceHolder) {
@@ -699,7 +670,7 @@ public final class CaptureActivity extends Activity implements SurfaceHolder.Cal
       cameraManager.openDriver(surfaceHolder);
       // Creating the handler starts the preview, which can also throw a RuntimeException.
       if (handler == null) {
-        handler = new CaptureActivityHandler(this, decodeFormats, characterSet, cameraManager);
+        handler = new CaptureActivityHandler(this, decodeFormats, decodeHints, characterSet, cameraManager);
       }
       decodeOrStoreSavedBitmap(null, null);
     } catch (IOException ioe) {

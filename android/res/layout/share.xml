@@ -35,7 +35,8 @@
         android:layout_height="wrap_content"
         android:gravity="center"
         android:text="@string/msg_share_explanation"
-        android:paddingBottom="@dimen/standard_padding"/>
+        android:paddingBottom="@dimen/standard_padding"
+        android:textIsSelectable="false"/>
 
     <ImageView
         android:layout_width="wrap_content"
@@ -51,14 +52,12 @@
         android:paddingBottom="@dimen/standard_padding">
 
       <Button android:id="@+id/share_app_button"
-              android:layout_width="fill_parent"
-              android:layout_height="wrap_content"
+              style="@style/ShareButton"
               android:layout_weight="1"
               android:text="@string/button_share_app"/>
 
       <Button android:id="@+id/share_bookmark_button"
-              android:layout_width="fill_parent"
-              android:layout_height="wrap_content"
+              style="@style/ShareButton"
               android:layout_weight="1"
               android:text="@string/button_share_bookmark"/>
 
@@ -71,14 +70,12 @@
         android:paddingBottom="@dimen/standard_padding">
 
       <Button android:id="@+id/share_contact_button"
-              android:layout_width="fill_parent"
-              android:layout_height="wrap_content"
+              style="@style/ShareButton"
               android:layout_weight="1"
               android:text="@string/button_share_contact"/>
 
       <Button android:id="@+id/share_clipboard_button"
-              android:layout_width="fill_parent"
-              android:layout_height="wrap_content"
+              style="@style/ShareButton"
               android:layout_weight="1"
               android:text="@string/button_share_clipboard"/>
 

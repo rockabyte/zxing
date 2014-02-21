@@ -92,7 +92,7 @@ public final class HistoryManager {
 
   public List<HistoryItem> buildHistoryItems() {
     SQLiteOpenHelper helper = new DBHelper(activity);
-    List<HistoryItem> items = new ArrayList<HistoryItem>();
+    List<HistoryItem> items = new ArrayList<>();
     SQLiteDatabase db = null;
     Cursor cursor = null;
     try {
@@ -204,10 +204,19 @@ public final class HistoryManager {
       }
 
       if (oldID != null) {
-        String newDetails = oldDetails == null ? itemDetails : oldDetails + " : " + itemDetails;
-        ContentValues values = new ContentValues();
-        values.put(DBHelper.DETAILS_COL, newDetails);
-        db.update(DBHelper.TABLE_NAME, values, DBHelper.ID_COL + "=?", new String[] { oldID });
+        String newDetails;
+        if (oldDetails == null) {
+          newDetails = itemDetails;
+        } else if (oldDetails.contains(itemDetails)) {
+          newDetails = null;
+        } else {
+          newDetails = oldDetails + " : " + itemDetails;
+        } 
+        if (newDetails != null) {
+          ContentValues values = new ContentValues();
+          values.put(DBHelper.DETAILS_COL, newDetails);
+          db.update(DBHelper.TABLE_NAME, values, DBHelper.ID_COL + "=?", new String[] { oldID });
+        }
       }
 
     } finally {
@@ -267,7 +276,6 @@ public final class HistoryManager {
    * </ul>
    */
   CharSequence buildHistory() {
-    StringBuilder historyText = new StringBuilder(1000);
     SQLiteOpenHelper helper = new DBHelper(activity);
     SQLiteDatabase db = null;
     Cursor cursor = null;
@@ -278,6 +286,7 @@ public final class HistoryManager {
                         null, null, null, null,
                         DBHelper.TIMESTAMP_COL + " DESC");
 
+      StringBuilder historyText = new StringBuilder(1000);
       while (cursor.moveToNext()) {
 
         historyText.append('"').append(massageHistoryField(cursor.getString(0))).append("\",");
